@@ -1,0 +1,1131 @@
+import { useState, useEffect } from "react";
+import { useParams, Link, useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Progress } from "@/components/ui/progress";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
+  Save, Bot, MessageSquare, Clock, Shield, Zap, Globe,
+  HelpCircle, Phone, FileText, Pencil, Check, X, Plus, Trash2,
+  BarChart3, Users, Calendar, ShoppingCart, TrendingUp, Eye, Inbox, Briefcase, FilePlus, Settings, LogOut, RefreshCw,
+  LayoutDashboard, Package, CircleHelp, Pause, Play
+} from "lucide-react";
+import { toast } from "@/hooks/use-toast";
+import { AGENT_TYPE_LABELS, AGENT_TYPE_ICONS, PERSONALITY_LABELS, LANGUAGE_OPTIONS } from "@/types/agent";
+import type { Agent, AgentType } from "@/types/agent";
+import WelcomeSequenceEditor from "@/components/WelcomeSequenceEditor";
+import AvailabilityTab from "@/components/AvailabilityTab";
+import BookingsTab from "@/components/BookingsTab";
+import OrdersTab from "@/components/OrdersTab";
+import ProductsTab from "@/components/ProductsTab";
+import ServicesTab from "@/components/ServicesTab";
+import PaymentMethodsSection from "@/components/PaymentMethodsSection";
+import InquiriesTab from "@/components/InquiriesTab";
+import CollectFieldsSection from "@/components/CollectFieldsSection";
+import DocumentTemplatesTab from "@/components/DocumentTemplatesTab";
+import { motion } from "framer-motion";
+import FloatingConfigBot from "@/components/FloatingConfigBot";
+import FAQsTab from "@/components/FAQsTab";
+import WhatsAppTab from "@/components/WhatsAppTab";
+
+interface AgentMeta {
+  capabilities?: string[];
+  businessHours?: string;
+  faqs?: Array<{ question: string; answer: string }>;
+  rules?: string[];
+  contactInfo?: string;
+}
+
+interface ConversationWithMessages {
+  id: string;
+  created_at: string;
+  session_id: string | null;
+  messageCount: number;
+  lastMessage?: string;
+  lastMessageTime?: string;
+}
+
+const sanitizeMeta = (raw: unknown): AgentMeta => {
+  const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const capabilities = Array.isArray(source.capabilities)
+    ? source.capabilities.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const rules = Array.isArray(source.rules)
+    ? source.rules.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const faqs = Array.isArray(source.faqs)
+    ? source.faqs
+        .filter(
+          (item): item is { question: string; answer: string } =>
+            !!item && typeof item === "object" &&
+            typeof (item as { question?: unknown }).question === "string" &&
+            typeof (item as { answer?: unknown }).answer === "string",
+        )
+        .map((item) => ({ question: item.question.trim(), answer: item.answer.trim() }))
+        .filter((item) => item.question.length > 0 || item.answer.length > 0)
+    : [];
+  return {
+    capabilities,
+    businessHours: typeof source.businessHours === "string" ? source.businessHours : "",
+    faqs,
+    rules,
+    contactInfo: typeof source.contactInfo === "string" ? source.contactInfo : "",
+  };
+};
+
+interface NavItem {
+  id: string;
+  label: string;
+  icon: React.ElementType;
+}
+
+function getNavItems(agentType: AgentType): NavItem[] {
+  const items: NavItem[] = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "conversations", label: "Chats", icon: MessageSquare },
+  ];
+
+  if (agentType === "order_handler") {
+    items.push({ id: "products", label: "Products", icon: Package });
+    items.push({ id: "faqs", label: "FAQs", icon: CircleHelp });
+    items.push({ id: "orders", label: "Orders", icon: ShoppingCart });
+  } else if (agentType === "booking_agent") {
+    items.push({ id: "services", label: "Services", icon: Briefcase });
+    items.push({ id: "faqs", label: "FAQs", icon: CircleHelp });
+    items.push({ id: "availability", label: "Availability", icon: Calendar });
+    items.push({ id: "bookings", label: "Bookings", icon: Calendar });
+  } else if (agentType === "support_bot" || agentType === "general_chatbot") {
+    items.push({ id: "services", label: "Services", icon: Briefcase });
+    items.push({ id: "faqs", label: "FAQs", icon: CircleHelp });
+    items.push({ id: "inquiries", label: "Inquiries", icon: Inbox });
+  } else if (agentType === "inquiry_only") {
+    items.push({ id: "faqs", label: "FAQs", icon: CircleHelp });
+    items.push({ id: "inquiries", label: "Inquiries", icon: Inbox });
+  } else if (agentType === "data_analyst") {
+    items.push({ id: "services", label: "Services", icon: Briefcase });
+    items.push({ id: "faqs", label: "FAQs", icon: CircleHelp });
+  }
+
+  items.push({ id: "whatsapp", label: "WhatsApp", icon: Phone });
+  items.push({ id: "settings", label: "Settings", icon: Settings });
+  items.push({ id: "account", label: "Account", icon: Users });
+
+  return items;
+}
+
+export default function AgentManage() {
+  const { user, signOut } = useAuth();
+  const navigate = useNavigate();
+  const [agent, setAgent] = useState<Agent | null>(null);
+  const [agentId, setAgentId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [activeSection, setActiveSection] = useState("dashboard");
+
+  // Editable fields
+  const [name, setName] = useState("");
+  const [welcomeMessage, setWelcomeMessage] = useState("");
+  const [knowledgeBase, setKnowledgeBase] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [defaultLanguage, setDefaultLanguage] = useState("auto");
+
+  // Parsed meta
+  const [meta, setMeta] = useState<AgentMeta>({});
+  const [editingSection, setEditingSection] = useState<string | null>(null);
+
+  // Editable meta fields
+  const [editCapabilities, setEditCapabilities] = useState<string[]>([]);
+  const [editHours, setEditHours] = useState("");
+  const [editFaqs, setEditFaqs] = useState<Array<{ question: string; answer: string }>>([]);
+  const [editRules, setEditRules] = useState<string[]>([]);
+  const [editContact, setEditContact] = useState("");
+
+  // Stats
+  const [stats, setStats] = useState({ conversations: 0, messages: 0, avgMessages: 0 });
+  const [conversations, setConversations] = useState<ConversationWithMessages[]>([]);
+  const [loadingConvos, setLoadingConvos] = useState(false);
+
+  // Auto-fetch user's agent
+  useEffect(() => {
+    if (!user) return;
+    const fetchAgent = async () => {
+      const { data } = await supabase
+        .from("agents")
+        .select("id")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (data && data.length > 0) {
+        setAgentId(data[0].id);
+        loadAgent(data[0].id);
+        loadStats(data[0].id);
+      } else {
+        navigate("/setup", { replace: true });
+      }
+    };
+    fetchAgent();
+  }, [user]);
+
+  useEffect(() => {
+    if (activeSection === "conversations" && agentId) loadConversations();
+  }, [activeSection]);
+
+  const loadAgent = async (agentId: string) => {
+    const { data } = await supabase.from("agents").select("*").eq("id", agentId).single();
+    if (data) {
+      setAgent(data);
+      setName(data.name);
+      setWelcomeMessage(data.welcome_message);
+      setKnowledgeBase(data.knowledge_base || "");
+      setSystemPrompt(data.system_prompt);
+      setDefaultLanguage((data as any).default_language || "auto");
+      parseMeta(data.knowledge_base || "");
+    }
+    setLoading(false);
+  };
+
+  const loadStats = async (agentId: string) => {
+    const { data: convos } = await supabase.from("conversations").select("id").eq("agent_id", agentId);
+    const convoCount = convos?.length || 0;
+    let msgCount = 0;
+    if (convos && convos.length > 0) {
+      const { count } = await supabase
+        .from("messages")
+        .select("*", { count: "exact", head: true })
+        .in("conversation_id", convos.map(c => c.id));
+      msgCount = count || 0;
+    }
+    setStats({
+      conversations: convoCount,
+      messages: msgCount,
+      avgMessages: convoCount > 0 ? Math.round(msgCount / convoCount) : 0,
+    });
+  };
+
+  const loadConversations = async () => {
+    if (!id || loadingConvos) return;
+    setLoadingConvos(true);
+    const { data: convos } = await supabase
+      .from("conversations").select("*").eq("agent_id", id)
+      .order("updated_at", { ascending: false });
+    if (convos && convos.length > 0) {
+      const convoIds = convos.map(c => c.id);
+      const { data: msgs } = await supabase
+        .from("messages").select("conversation_id, content, created_at, role")
+        .in("conversation_id", convoIds).order("created_at", { ascending: false });
+      const msgMap: Record<string, { count: number; last?: string; lastTime?: string }> = {};
+      msgs?.forEach(m => {
+        if (!msgMap[m.conversation_id]) {
+          msgMap[m.conversation_id] = { count: 0, last: m.role === "user" ? m.content : undefined, lastTime: m.created_at };
+        }
+        msgMap[m.conversation_id].count++;
+        if (!msgMap[m.conversation_id].last && m.role === "user") {
+          msgMap[m.conversation_id].last = m.content;
+        }
+      });
+      setConversations(convos.map(c => ({
+        id: c.id, created_at: c.created_at, session_id: c.session_id,
+        messageCount: msgMap[c.id]?.count || 0,
+        lastMessage: msgMap[c.id]?.last,
+        lastMessageTime: msgMap[c.id]?.lastTime,
+      })));
+    } else {
+      setConversations([]);
+    }
+    setLoadingConvos(false);
+  };
+
+  const parseMeta = (kb: string) => {
+    const metaMarker = "---AGENT_META---";
+    const metaIndex = kb.indexOf(metaMarker);
+    if (metaIndex === -1) {
+      const empty = sanitizeMeta({});
+      setMeta(empty);
+      setEditCapabilities(empty.capabilities || []);
+      setEditHours(empty.businessHours || "");
+      setEditFaqs(empty.faqs || []);
+      setEditRules(empty.rules || []);
+      setEditContact(empty.contactInfo || "");
+      return;
+    }
+    try {
+      const metaJson = kb.slice(metaIndex + metaMarker.length).trim();
+      const parsed = sanitizeMeta(JSON.parse(metaJson));
+      setMeta(parsed);
+      setEditCapabilities(parsed.capabilities || []);
+      setEditHours(parsed.businessHours || "");
+      setEditFaqs(parsed.faqs || []);
+      setEditRules(parsed.rules || []);
+      setEditContact(parsed.contactInfo || "");
+    } catch {
+      const safeFallback = sanitizeMeta({});
+      setMeta(safeFallback);
+      setEditCapabilities(safeFallback.capabilities || []);
+      setEditHours(safeFallback.businessHours || "");
+      setEditFaqs(safeFallback.faqs || []);
+      setEditRules(safeFallback.rules || []);
+      setEditContact(safeFallback.contactInfo || "");
+    }
+  };
+
+  const buildKnowledgeBase = (baseMeta: AgentMeta): string => {
+    let kb = "";
+    if (baseMeta.businessHours) kb += `Business Hours: ${baseMeta.businessHours}\n\n`;
+    if (baseMeta.contactInfo) kb += `Contact Information: ${baseMeta.contactInfo}\n\n`;
+    if (baseMeta.capabilities && baseMeta.capabilities.length > 0) {
+      kb += `Capabilities:\n${baseMeta.capabilities.map(c => `- ${c}`).join("\n")}\n\n`;
+    }
+    if (baseMeta.faqs && baseMeta.faqs.length > 0) {
+      kb += `Frequently Asked Questions:\n`;
+      baseMeta.faqs.forEach(f => { kb += `Q: ${f.question}\nA: ${f.answer}\n\n`; });
+    }
+    if (baseMeta.rules && baseMeta.rules.length > 0) {
+      kb += `Rules & Guidelines:\n${baseMeta.rules.map(r => `- ${r}`).join("\n")}\n\n`;
+    }
+    kb += `---AGENT_META---\n${JSON.stringify(baseMeta)}`;
+    return kb;
+  };
+
+  const generateSystemPrompt = (agentData: Agent, m: AgentMeta): string => {
+    const personality = PERSONALITY_LABELS[agentData.personality] || agentData.personality;
+    const agentType = AGENT_TYPE_LABELS[agentData.agent_type] || agentData.agent_type;
+    let prompt = `You are "${agentData.name}", a ${personality.toLowerCase()} ${agentType.toLowerCase()} AI assistant.\n\n`;
+    if (m.capabilities && m.capabilities.length > 0) {
+      prompt += `Your capabilities:\n${m.capabilities.map(c => `- ${c}`).join("\n")}\n\n`;
+    }
+    if (m.rules && m.rules.length > 0) {
+      prompt += `Rules you must follow:\n${m.rules.map(r => `- ${r}`).join("\n")}\n\n`;
+    }
+    if (m.faqs && m.faqs.length > 0) {
+      prompt += `When users ask these common questions, use these answers:\n`;
+      m.faqs.forEach(f => { prompt += `Q: ${f.question}\nA: ${f.answer}\n\n`; });
+    }
+    if (m.businessHours) prompt += `Business hours: ${m.businessHours}\n\n`;
+    if (m.contactInfo) prompt += `Contact information: ${m.contactInfo}\n\n`;
+    return prompt.trim();
+  };
+
+  const saveSection = async (section: string) => {
+    if (!agent || !id) return;
+    setSaving(true);
+    try {
+      const updatedMeta: AgentMeta = {
+        capabilities: editCapabilities, businessHours: editHours,
+        faqs: editFaqs, rules: editRules, contactInfo: editContact,
+      };
+      const newKb = buildKnowledgeBase(updatedMeta);
+      const updates: any = {};
+      if (section === "name") updates.name = name;
+      if (section === "welcome") updates.welcome_message = welcomeMessage;
+      if (section === "prompt") updates.system_prompt = systemPrompt;
+      if (section === "language") updates.default_language = defaultLanguage;
+      const metaSections = ["capabilities", "hours", "faqs", "rules", "contact"];
+      if (metaSections.includes(section)) {
+        updates.knowledge_base = newKb;
+        const newPrompt = generateSystemPrompt(agent, updatedMeta);
+        updates.system_prompt = newPrompt;
+        setSystemPrompt(newPrompt);
+      }
+      await supabase.from("agents").update(updates).eq("id", id);
+      setMeta(updatedMeta);
+      setKnowledgeBase(newKb);
+      setEditingSection(null);
+      toast({ title: "Saved!", description: metaSections.includes(section) ? "System prompt auto-updated." : undefined });
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleStatus = async () => {
+    if (!agent || !id) return;
+    const newStatus = agent.status === "active" ? "paused" : "active";
+    await supabase.from("agents").update({ status: newStatus }).eq("id", id);
+    setAgent({ ...agent, status: newStatus });
+    toast({ title: newStatus === "active" ? "Agent activated!" : "Agent paused" });
+  };
+
+  if (loading) {
+    return <div className="min-h-screen flex items-center justify-center bg-background text-muted-foreground">Loading...</div>;
+  }
+  if (!agent) {
+    return <div className="min-h-screen flex items-center justify-center bg-background text-muted-foreground">Agent not found</div>;
+  }
+
+  const navItems = getNavItems(agent.agent_type);
+  const formatDate = (d: string) => {
+    const date = new Date(d);
+    return date.toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
+  return (
+    <div className="min-h-screen bg-background flex">
+      {/* Sidebar */}
+      <aside className="w-[250px] border-r border-border/60 flex flex-col bg-sidebar-background shrink-0 sticky top-0 h-screen">
+        {/* Logo */}
+        <div className="px-5 py-5 flex items-center gap-2.5">
+          <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center">
+            <Bot className="h-5 w-5 text-primary-foreground" />
+          </div>
+          <span className="font-display text-lg font-bold text-foreground">EasyBot</span>
+        </div>
+
+        {/* Nav */}
+        <nav className="flex-1 px-3 py-2 space-y-0.5">
+          {navItems.map(item => {
+            const isActive = activeSection === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveSection(item.id)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  isActive
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                }`}
+              >
+                <item.icon className="h-4 w-4" />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Bottom */}
+        <div className="px-3 pb-4">
+          <p className="text-xs text-muted-foreground/60 text-center">
+            Powered by <span className="text-primary font-medium">EasyBot</span>
+          </p>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 min-h-screen overflow-auto">
+        <div className="px-8 py-8">
+          {activeSection === "dashboard" && (
+            <DashboardSection
+              agent={agent}
+              stats={stats}
+              meta={meta}
+              id={id!}
+              toggleStatus={toggleStatus}
+              formatDate={formatDate}
+            />
+          )}
+
+          {activeSection === "conversations" && (
+            <ConversationsSection
+              conversations={conversations}
+              loadingConvos={loadingConvos}
+              formatDate={formatDate}
+            />
+          )}
+
+          {activeSection === "products" && id && <ProductsSection agentId={id} meta={meta} defaultCurrency={(agent as any).default_currency || "USD"} onCurrencyChanged={() => { loadAgent(id); loadStats(id); }} />}
+          {activeSection === "services" && id && <ServicesSection agentId={id} defaultCurrency={(agent as any).default_currency || "USD"} onCurrencyChanged={() => { loadAgent(id); loadStats(id); }} />}
+          {activeSection === "orders" && id && <OrdersSectionView agentId={id} defaultCurrency={(agent as any).default_currency || "USD"} />}
+          {activeSection === "bookings" && id && <BookingsSection agentId={id} />}
+          {activeSection === "availability" && id && <AvailabilitySection agentId={id} />}
+          {activeSection === "inquiries" && id && <InquiriesSection agentId={id} />}
+          {activeSection === "faqs" && id && <FAQsTab agentId={id} agentType={agent?.agent_type as AgentType} />}
+          {activeSection === "whatsapp" && id && <WhatsAppTab agentId={id} />}
+
+          {activeSection === "settings" && (
+            <SettingsSection
+              agent={agent}
+              id={id!}
+              meta={meta}
+              editingSection={editingSection}
+              setEditingSection={setEditingSection}
+              editCapabilities={editCapabilities}
+              setEditCapabilities={setEditCapabilities}
+              editHours={editHours}
+              setEditHours={setEditHours}
+              editRules={editRules}
+              setEditRules={setEditRules}
+              editContact={editContact}
+              setEditContact={setEditContact}
+              defaultLanguage={defaultLanguage}
+              setDefaultLanguage={setDefaultLanguage}
+              systemPrompt={systemPrompt}
+              setSystemPrompt={setSystemPrompt}
+              saving={saving}
+              saveSection={saveSection}
+            />
+          )}
+
+          {activeSection === "account" && (
+            <AccountSection user={user} signOut={signOut} />
+          )}
+        </div>
+      </main>
+
+      {/* Floating Config Bot */}
+      {agent && id && (
+        <FloatingConfigBot agent={agent} onAgentUpdated={() => { loadAgent(id); loadStats(id); }} />
+      )}
+    </div>
+  );
+}
+
+/* ==================== DASHBOARD SECTION ==================== */
+function DashboardSection({
+  agent, stats, meta, id, toggleStatus, formatDate
+}: {
+  agent: Agent; stats: { conversations: number; messages: number; avgMessages: number };
+  meta: AgentMeta; id: string; toggleStatus: () => void; formatDate: (d: string) => string;
+}) {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-foreground">Dashboard</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">Overview of your {agent.name} chatbot system</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button
+            variant={agent.status === "active" ? "outline" : "default"}
+            size="sm"
+            onClick={toggleStatus}
+            className="gap-2"
+          >
+            {agent.status === "active" ? (
+              <><Pause className="h-3.5 w-3.5" /> Pause Bot</>
+            ) : (
+              <><Play className="h-3.5 w-3.5" /> Activate Bot</>
+            )}
+          </Button>
+          <Link to={`/agents/${id}/chat`}>
+            <Button size="sm" className="gap-2">
+              <MessageSquare className="h-3.5 w-3.5" /> Test Chat
+            </Button>
+          </Link>
+        </div>
+      </div>
+
+      {/* Stat Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {[
+          { label: "Total Conversations", value: stats.conversations, icon: MessageSquare, color: "text-primary" },
+          { label: "Total Messages", value: stats.messages, icon: TrendingUp, color: "text-primary" },
+          { label: "Avg Messages / Convo", value: stats.avgMessages, icon: BarChart3, color: "text-primary" },
+        ].map((s, i) => (
+          <motion.div key={s.label} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}>
+            <Card className="border-border/50">
+              <CardContent className="p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-sm text-muted-foreground">{s.label}</p>
+                  <s.icon className={`h-4 w-4 ${s.color}`} />
+                </div>
+                <p className="text-3xl font-display font-bold text-foreground">{s.value}</p>
+              </CardContent>
+            </Card>
+          </motion.div>
+        ))}
+      </div>
+
+      {/* Agent Summary Card */}
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
+        <Card className="border-border/50">
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-2">
+              <Bot className="h-4 w-4 text-primary" />
+              <CardTitle className="font-display text-lg">Bot Status</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+              <div>
+                <p className="text-muted-foreground mb-1">Type</p>
+                <p className="font-medium">{AGENT_TYPE_LABELS[agent.agent_type]}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground mb-1">Personality</p>
+                <p className="font-medium">{PERSONALITY_LABELS[agent.personality]}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground mb-1">Status</p>
+                <Badge variant={agent.status === "active" ? "default" : "secondary"} className="text-xs">
+                  {agent.status}
+                </Badge>
+              </div>
+              <div>
+                <p className="text-muted-foreground mb-1">Created</p>
+                <p className="font-medium">{formatDate(agent.created_at)}</p>
+              </div>
+            </div>
+            {meta.capabilities && meta.capabilities.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-border/50">
+                <p className="text-muted-foreground text-sm mb-2">Capabilities</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {meta.capabilities.map((cap, i) => (
+                    <Badge key={i} variant="secondary" className="text-xs">{cap}</Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </motion.div>
+
+      {/* Activity */}
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
+        <Card className="border-border/50">
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-primary" />
+              <CardTitle className="font-display text-lg">Recent Activity</CardTitle>
+            </div>
+            <CardDescription>Latest activity from your chatbot</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-muted-foreground text-sm">
+              {stats.conversations === 0
+                ? "No conversations yet. Deploy your agent and share the link to start getting analytics."
+                : `Your agent has had ${stats.conversations} conversation${stats.conversations !== 1 ? "s" : ""} with ${stats.messages} total messages.`}
+            </p>
+          </CardContent>
+        </Card>
+      </motion.div>
+    </div>
+  );
+}
+
+/* ==================== CONVERSATIONS SECTION ==================== */
+function ConversationsSection({
+  conversations, loadingConvos, formatDate
+}: {
+  conversations: ConversationWithMessages[];
+  loadingConvos: boolean;
+  formatDate: (d: string) => string;
+}) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Chats</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Chat history and live messages</p>
+      </div>
+
+      {loadingConvos ? (
+        <div className="text-center text-muted-foreground py-12">Loading conversations...</div>
+      ) : conversations.length === 0 ? (
+        <Card className="border-border/50">
+          <CardContent className="text-center py-16">
+            <MessageSquare className="h-12 w-12 text-muted-foreground/40 mx-auto mb-3" />
+            <p className="text-muted-foreground font-medium">No conversations yet</p>
+            <p className="text-sm text-muted-foreground mt-1">Conversations will appear here once customers start chatting.</p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-2">
+          {conversations.map((convo, i) => (
+            <motion.div key={convo.id} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.03 }}>
+              <Card className="border-border/50 hover:border-primary/30 transition-colors cursor-pointer">
+                <CardContent className="flex items-center justify-between p-4">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="rounded-full bg-primary/10 p-2 shrink-0">
+                      <Users className="h-4 w-4 text-primary" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {convo.lastMessage ? convo.lastMessage.slice(0, 80) + (convo.lastMessage.length > 80 ? "..." : "") : "No messages"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatDate(convo.created_at)} -- {convo.messageCount} messages
+                      </p>
+                    </div>
+                  </div>
+                  <Badge variant="secondary" className="text-xs shrink-0 ml-3">
+                    {convo.session_id ? "Session" : "Anonymous"}
+                  </Badge>
+                </CardContent>
+              </Card>
+            </motion.div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ==================== WRAPPER SECTIONS ==================== */
+function ProductsSection({ agentId, meta, defaultCurrency, onCurrencyChanged }: { agentId: string; meta: AgentMeta; defaultCurrency: string; onCurrencyChanged?: () => void }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Products</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Manage your product catalog for the chatbot</p>
+      </div>
+      <ProductsTab agentId={agentId} meta={meta} defaultCurrency={defaultCurrency} onCurrencyChanged={onCurrencyChanged} />
+    </div>
+  );
+}
+
+function ServicesSection({ agentId, defaultCurrency, onCurrencyChanged }: { agentId: string; defaultCurrency: string; onCurrencyChanged?: () => void }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Services</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Manage your services for the chatbot</p>
+      </div>
+      <ServicesTab agentId={agentId} defaultCurrency={defaultCurrency} onCurrencyChanged={onCurrencyChanged} />
+    </div>
+  );
+}
+
+function OrdersSectionView({ agentId, defaultCurrency }: { agentId: string; defaultCurrency: string }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Orders</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Manage customer orders from your chatbot</p>
+      </div>
+      <OrdersTab agentId={agentId} defaultCurrency={defaultCurrency} />
+    </div>
+  );
+}
+
+function BookingsSection({ agentId }: { agentId: string }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Bookings</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">View and manage all bookings</p>
+      </div>
+      <BookingsTab agentId={agentId} />
+    </div>
+  );
+}
+
+function AvailabilitySection({ agentId }: { agentId: string }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Availability</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Set your available time slots</p>
+      </div>
+      <AvailabilityTab agentId={agentId} />
+    </div>
+  );
+}
+
+function InquiriesSection({ agentId }: { agentId: string }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Inquiries</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Customer inquiries from your chatbot</p>
+      </div>
+      <InquiriesTab agentId={agentId} />
+    </div>
+  );
+}
+
+/* ==================== SETTINGS SECTION ==================== */
+function SettingsSection({
+  agent, id, meta, editingSection, setEditingSection,
+  editCapabilities, setEditCapabilities,
+  editHours, setEditHours,
+  editRules, setEditRules,
+  editContact, setEditContact,
+  defaultLanguage, setDefaultLanguage,
+  systemPrompt, setSystemPrompt,
+  saving, saveSection,
+}: {
+  agent: Agent; id: string; meta: AgentMeta;
+  editingSection: string | null; setEditingSection: (s: string | null) => void;
+  editCapabilities: string[]; setEditCapabilities: (v: string[]) => void;
+  editHours: string; setEditHours: (v: string) => void;
+  editRules: string[]; setEditRules: (v: string[]) => void;
+  editContact: string; setEditContact: (v: string) => void;
+  defaultLanguage: string; setDefaultLanguage: (v: string) => void;
+  systemPrompt: string; setSystemPrompt: (v: string) => void;
+  saving: boolean; saveSection: (section: string) => void;
+}) {
+  const navigate = useNavigate();
+  const [reconfiguring, setReconfiguring] = useState(false);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Settings</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Configure your chatbot behavior</p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Capabilities */}
+        <Card className="border-border/50 h-full">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Zap className="h-4 w-4 text-primary" />
+                <CardTitle className="font-display text-lg">Capabilities</CardTitle>
+              </div>
+              {editingSection !== "capabilities" ? (
+                <button onClick={() => setEditingSection("capabilities")} className="text-muted-foreground hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button>
+              ) : (
+                <div className="flex gap-1">
+                  <Button size="icon" variant="ghost" onClick={() => saveSection("capabilities")} disabled={saving}><Check className="h-4 w-4 text-primary" /></Button>
+                  <Button size="icon" variant="ghost" onClick={() => { setEditCapabilities(meta.capabilities || []); setEditingSection(null); }}><X className="h-4 w-4" /></Button>
+                </div>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {editingSection === "capabilities" ? (
+              <div className="space-y-2">
+                {editCapabilities.map((cap, i) => (
+                  <div key={i} className="flex gap-2">
+                    <Input value={cap} onChange={e => { const n = [...editCapabilities]; n[i] = e.target.value; setEditCapabilities(n); }} className="text-sm" />
+                    <Button size="icon" variant="ghost" onClick={() => setEditCapabilities(editCapabilities.filter((_, j) => j !== i))}><Trash2 className="h-3.5 w-3.5 text-destructive" /></Button>
+                  </div>
+                ))}
+                <Button variant="outline" size="sm" onClick={() => setEditCapabilities([...editCapabilities, ""])} className="gap-1.5"><Plus className="h-3.5 w-3.5" /> Add</Button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {(meta.capabilities && meta.capabilities.length > 0) ? meta.capabilities.map((cap, i) => (
+                  <div key={i} className="flex items-start gap-2 text-sm">
+                    <Check className="h-3.5 w-3.5 text-primary mt-0.5 shrink-0" />
+                    <span>{cap}</span>
+                  </div>
+                )) : <p className="text-sm text-muted-foreground">No capabilities defined yet</p>}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Business Hours & Contact */}
+        <Card className="border-border/50 h-full">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4 text-primary" />
+                <CardTitle className="font-display text-lg">Business Info</CardTitle>
+              </div>
+              {editingSection !== "hours" ? (
+                <button onClick={() => setEditingSection("hours")} className="text-muted-foreground hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button>
+              ) : (
+                <div className="flex gap-1">
+                  <Button size="icon" variant="ghost" onClick={() => { saveSection("hours"); saveSection("contact"); }} disabled={saving}><Check className="h-4 w-4 text-primary" /></Button>
+                  <Button size="icon" variant="ghost" onClick={() => { setEditHours(meta.businessHours || ""); setEditContact(meta.contactInfo || ""); setEditingSection(null); }}><X className="h-4 w-4" /></Button>
+                </div>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {editingSection === "hours" ? (
+              <>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Business Hours</Label>
+                  <Input value={editHours} onChange={e => setEditHours(e.target.value)} placeholder="e.g. Mon-Fri 9am-5pm" />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Contact Info</Label>
+                  <Textarea value={editContact} onChange={e => setEditContact(e.target.value)} placeholder="Phone, email, address..." rows={3} />
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">Hours</p>
+                  <p className="text-sm">{meta.businessHours || "Not set"}</p>
+                </div>
+                <Separator className="bg-border/50" />
+                <div>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <Phone className="h-3 w-3 text-muted-foreground" />
+                    <p className="text-xs text-muted-foreground">Contact</p>
+                  </div>
+                  <p className="text-sm whitespace-pre-wrap">{meta.contactInfo || "Not set"}</p>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Rules */}
+        <Card className="border-border/50 h-full">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Shield className="h-4 w-4 text-primary" />
+                <CardTitle className="font-display text-lg">Rules & Guidelines</CardTitle>
+              </div>
+              {editingSection !== "rules" ? (
+                <button onClick={() => setEditingSection("rules")} className="text-muted-foreground hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button>
+              ) : (
+                <div className="flex gap-1">
+                  <Button size="icon" variant="ghost" onClick={() => saveSection("rules")} disabled={saving}><Check className="h-4 w-4 text-primary" /></Button>
+                  <Button size="icon" variant="ghost" onClick={() => { setEditRules(meta.rules || []); setEditingSection(null); }}><X className="h-4 w-4" /></Button>
+                </div>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {editingSection === "rules" ? (
+              <div className="space-y-2">
+                {editRules.map((rule, i) => (
+                  <div key={i} className="flex gap-2">
+                    <Input value={rule} onChange={e => { const n = [...editRules]; n[i] = e.target.value; setEditRules(n); }} className="text-sm" />
+                    <Button size="icon" variant="ghost" onClick={() => setEditRules(editRules.filter((_, j) => j !== i))}><Trash2 className="h-3.5 w-3.5 text-destructive" /></Button>
+                  </div>
+                ))}
+                <Button variant="outline" size="sm" onClick={() => setEditRules([...editRules, ""])} className="gap-1.5"><Plus className="h-3.5 w-3.5" /> Add Rule</Button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {(meta.rules && meta.rules.length > 0) ? meta.rules.map((rule, i) => (
+                  <div key={i} className="flex items-start gap-2 text-sm">
+                    <span className="text-primary mt-0.5 font-bold">--</span>
+                    <span>{rule}</span>
+                  </div>
+                )) : <p className="text-sm text-muted-foreground">No rules defined yet</p>}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Language */}
+      <Card className="border-border/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Globe className="h-4 w-4 text-primary" />
+            <CardTitle className="font-display text-lg">Default Language</CardTitle>
+          </div>
+          <CardDescription>Choose which language your agent responds in</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Select value={defaultLanguage} onValueChange={setDefaultLanguage}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {LANGUAGE_OPTIONS.map(lang => (
+                <SelectItem key={lang.value} value={lang.value}>{lang.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button size="sm" onClick={() => saveSection("language")} disabled={saving} className="gap-1.5">
+            <Save className="h-3.5 w-3.5" /> Save Language
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Welcome Sequence */}
+      <Card className="border-border/50">
+        <CardContent className="p-6">
+          <WelcomeSequenceEditor agentId={id} />
+        </CardContent>
+      </Card>
+
+      {/* Payment Methods */}
+      {(agent.agent_type === "order_handler" || agent.agent_type === "booking_agent") && (
+        <PaymentMethodsSection agentId={id} />
+      )}
+
+      {/* Document Templates */}
+      <Card className="border-border/50">
+        <CardContent className="p-6">
+          <DocumentTemplatesTab agentId={id} />
+        </CardContent>
+      </Card>
+
+      {/* Collect Fields */}
+      {(agent.agent_type === "support_bot" || agent.agent_type === "general_chatbot") && (
+        <CollectFieldsSection agentId={id} />
+      )}
+
+      {/* System Prompt */}
+      <Card className="border-border/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <FileText className="h-4 w-4 text-primary" />
+              <CardTitle className="font-display text-lg">System Prompt</CardTitle>
+              <Badge variant="outline" className="text-xs">Advanced</Badge>
+            </div>
+            {editingSection !== "prompt" ? (
+              <button onClick={() => setEditingSection("prompt")} className="text-muted-foreground hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button>
+            ) : (
+              <div className="flex gap-1">
+                <Button size="icon" variant="ghost" onClick={() => saveSection("prompt")} disabled={saving}><Check className="h-4 w-4 text-primary" /></Button>
+                <Button size="icon" variant="ghost" onClick={() => { setSystemPrompt(agent.system_prompt); setEditingSection(null); }}><X className="h-4 w-4" /></Button>
+              </div>
+            )}
+          </div>
+          <CardDescription>The instructions that define your agent's behavior</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {editingSection === "prompt" ? (
+            <Textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)} rows={10} className="text-sm font-mono" />
+          ) : (
+            <pre className="text-sm text-muted-foreground whitespace-pre-wrap bg-secondary/50 rounded-lg p-4 max-h-48 overflow-y-auto">{agent.system_prompt}</pre>
+          )}
+        </CardContent>
+      </Card>
+
+    </div>
+  );
+}
+
+/* ==================== ACCOUNT SECTION ==================== */
+function AccountSection({ user, signOut }: { user: any; signOut: () => Promise<void> }) {
+  const navigate = useNavigate();
+  const [displayName, setDisplayName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [reconfiguring, setReconfiguring] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(true);
+
+  useEffect(() => {
+    if (user) {
+      supabase.from("profiles").select("*").eq("user_id", user.id).maybeSingle().then(({ data }) => {
+        if (data) setDisplayName(data.display_name || "");
+        setProfileLoading(false);
+      });
+    }
+  }, [user]);
+
+  const saveProfile = async () => {
+    setSaving(true);
+    try {
+      await supabase.from("profiles").update({ display_name: displayName }).eq("user_id", user.id);
+      toast({ title: "Profile updated!" });
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold text-foreground">Account</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">Manage your account settings</p>
+      </div>
+
+      {/* Profile */}
+      <Card className="border-border/50">
+        <CardHeader className="pb-3">
+          <CardTitle className="font-display text-lg">Profile</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Email</Label>
+            <Input value={user?.email || ""} disabled />
+          </div>
+          <div className="space-y-2">
+            <Label>Display Name</Label>
+            <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Your name" />
+          </div>
+          <Button onClick={saveProfile} disabled={saving || profileLoading} size="sm" className="gap-1.5">
+            <Save className="h-3.5 w-3.5" /> Save Profile
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Subscription */}
+      <Card className="border-border/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Zap className="h-4 w-4 text-primary" />
+            <CardTitle className="font-display text-lg">Subscription</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Button variant="outline" size="sm" className="gap-2" onClick={() => navigate("/admin")}>
+            <Zap className="h-3.5 w-3.5" /> Manage Plans & Subscription
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Danger Zone */}
+      <Card className="border-destructive/30">
+        <CardHeader className="pb-3">
+          <CardTitle className="font-display text-lg text-destructive">Danger Zone</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Reconfigure Bot */}
+          <div className="flex items-center justify-between gap-4 p-4 rounded-xl border border-destructive/20 bg-destructive/5">
+            <div>
+              <p className="text-sm font-medium">Reconfigure Bot</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Deletes products, services, FAQs, welcome sequence, payment methods, templates, and settings. Chat history and billing stats are preserved.
+              </p>
+            </div>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="destructive" size="sm" className="gap-2 shrink-0">
+                  <RefreshCw className="h-4 w-4" /> Reconfigure
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Reconfigure this bot?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will permanently remove your bot configuration and return you to the initial setup flow.
+                    <br /><br />
+                    <strong>Chat history and billing-related stats will be preserved.</strong>
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    disabled={reconfiguring}
+                    onClick={async (e) => {
+                      e.preventDefault();
+                      setReconfiguring(true);
+                      try {
+                        const { error } = await supabase.functions.invoke("reconfigure-agent");
+                        if (error) throw error;
+                        toast({ title: "Bot reset successfully", description: "Redirecting to setup..." });
+                        navigate("/agents/new", { replace: true });
+                      } catch (err: any) {
+                        toast({ title: "Error", description: err.message, variant: "destructive" });
+                      } finally {
+                        setReconfiguring(false);
+                      }
+                    }}
+                  >
+                    {reconfiguring ? "Deleting..." : "Yes, reconfigure"}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
+
+          {/* Sign Out */}
+          <div className="flex items-center justify-between gap-4 p-4 rounded-xl border border-border/50">
+            <div>
+              <p className="text-sm font-medium">Sign Out</p>
+              <p className="text-xs text-muted-foreground mt-1">Sign out of your account.</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => { signOut(); navigate("/"); }}>
+              <LogOut className="h-4 w-4 mr-1.5" /> Sign Out
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
